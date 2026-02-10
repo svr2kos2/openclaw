@@ -307,6 +307,13 @@ export class LLMDecisionMaker {
     const logs: MemoryLogEntry[] = [];
     const now = Date.now();
 
+    this.logger.info(
+      `memory-lancedb: LLMDecisionMaker.evaluate() - api=${this.api}, model=${this.model}, baseUrl=${this.baseUrl}`,
+    );
+    this.logger.info(
+      `memory-lancedb: prompt length=${userPrompt.length}, context=${journal.cleanContext.length}, delta=${delta.length}`,
+    );
+
     // Create the appropriate adapter
     const adapter: ChatAdapter =
       this.api === "anthropic-messages"
@@ -314,7 +321,21 @@ export class LLMDecisionMaker {
         : new OpenAIAdapter(this.model, this.apiKey, this.baseUrl, SYSTEM_PROMPT, userPrompt);
 
     for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
-      const response = await adapter.complete();
+      this.logger.info(`memory-lancedb: LLM iteration ${iter + 1}/${MAX_TOOL_ITERATIONS}...`);
+
+      let response: AdapterResponse;
+      try {
+        response = await adapter.complete();
+        this.logger.info(
+          `memory-lancedb: LLM response - toolCalls=${response.toolCalls.length}, done=${response.done}`,
+        );
+      } catch (err) {
+        this.logger.warn(`memory-lancedb: LLM API call failed: ${String(err)}`);
+        if (err instanceof Error && err.stack) {
+          this.logger.warn(`memory-lancedb: stack: ${err.stack}`);
+        }
+        throw err;
+      }
 
       if (response.toolCalls.length === 0 || response.done) {
         // Execute any final tool calls before breaking
@@ -322,10 +343,14 @@ export class LLMDecisionMaker {
           const log = await this.handleToolCall(tc, journal.cleanContext.length, now, adapter);
           if (log) logs.push(log);
         }
+        this.logger.info(
+          `memory-lancedb: LLM done after ${iter + 1} iterations, ${logs.length} ops`,
+        );
         break;
       }
 
       for (const tc of response.toolCalls) {
+        this.logger.info(`memory-lancedb: executing tool ${tc.name} (id=${tc.id})`);
         const log = await this.handleToolCall(tc, journal.cleanContext.length, now, adapter);
         if (log) logs.push(log);
       }
@@ -347,9 +372,7 @@ export class LLMDecisionMaker {
     try {
       const log = await this.executeTool(tc.name, tc.args, deltaIndex);
       if (log) log.timestamp = now;
-      const resultText = log
-        ? `Success: ${log.action} memory ${log.memoryId}`
-        : "No action taken.";
+      const resultText = log ? `Success: ${log.action} memory ${log.memoryId}` : "No action taken.";
       adapter.pushToolResult(tc.id, resultText, false);
       return log;
     } catch (err) {

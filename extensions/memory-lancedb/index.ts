@@ -554,7 +554,12 @@ const memoryPlugin = {
         );
 
         api.on("agent_end", async (event, ctx) => {
+          api.logger.info(
+            `memory-lancedb: agent_end triggered, success=${event.success}, messages=${event.messages?.length ?? 0}`,
+          );
+
           if (!event.success || !event.messages || event.messages.length === 0) {
+            api.logger.info("memory-lancedb: skipping - no success or no messages");
             return;
           }
 
@@ -564,23 +569,44 @@ const memoryPlugin = {
             return;
           }
 
+          api.logger.info(`memory-lancedb: processing session=${sessionKey}`);
+
           try {
             // Extract user/assistant plain text from the event messages
             const cleanMsgs = extractCleanMessages(event.messages);
-            if (cleanMsgs.length === 0) return;
+            api.logger.info(
+              `memory-lancedb: extracted ${cleanMsgs.length} clean messages from ${event.messages.length} raw messages`,
+            );
+            if (cleanMsgs.length === 0) {
+              api.logger.info("memory-lancedb: no clean messages, skipping");
+              return;
+            }
 
             // Append to journal and get unprocessed delta
             const { journal: journalData, delta } = await journal.appendMessages(
               sessionKey,
               cleanMsgs,
             );
-            if (delta.length === 0) return;
+            api.logger.info(
+              `memory-lancedb: journal state - context=${journalData.cleanContext.length}, processedIndex=${journalData.processedIndex}, delta=${delta.length}`,
+            );
+            if (delta.length === 0) {
+              api.logger.info("memory-lancedb: delta is empty, skipping LLM call");
+              return;
+            }
 
             // Run LLM decision maker on the delta
+            api.logger.info(
+              `memory-lancedb: calling LLM decision maker with ${delta.length} new messages...`,
+            );
             const { logs } = await decisionMaker.evaluate(journalData, delta);
+            api.logger.info(`memory-lancedb: LLM returned ${logs.length} memory operations`);
 
             // Commit decisions (advance processedIndex + save logs)
             await journal.commitDecisions(sessionKey, logs, journalData.cleanContext.length);
+            api.logger.info(
+              `memory-lancedb: committed decisions, new processedIndex=${journalData.cleanContext.length}`,
+            );
 
             if (logs.length > 0) {
               api.logger.info(
@@ -589,6 +615,10 @@ const memoryPlugin = {
             }
           } catch (err) {
             api.logger.warn(`memory-lancedb: LLM capture failed: ${String(err)}`);
+            // Log full stack if available
+            if (err instanceof Error && err.stack) {
+              api.logger.warn(`memory-lancedb: stack: ${err.stack}`);
+            }
           }
         });
       }
