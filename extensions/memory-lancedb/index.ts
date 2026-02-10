@@ -545,6 +545,7 @@ const memoryPlugin = {
         };
 
         const decisionMaker = new LLMDecisionMaker(
+          cfg.chat.api,
           cfg.chat.model,
           cfg.chat.apiKey,
           cfg.chat.baseUrl,

@@ -14,7 +14,10 @@ export type EmbeddingConfig = {
   dimensions: number;
 };
 
+export type ChatApi = "openai-completions" | "anthropic-messages";
+
 export type ChatConfig = {
+  api: ChatApi;
   model: string;
   apiKey: string;
   baseUrl: string;
@@ -39,6 +42,10 @@ const DEFAULT_EMBEDDING_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 const DEFAULT_CHAT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_CHAT_MODEL = "gpt-4o-mini";
+const DEFAULT_CHAT_API: ChatApi = "openai-completions";
+const VALID_CHAT_APIS: ChatApi[] = ["openai-completions", "anthropic-messages"];
+const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com";
+const ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
 const LEGACY_STATE_DIRS: string[] = [];
 
 function resolveDefaultDbPath(): string {
@@ -165,10 +172,26 @@ function resolveChatConfig(chat: Record<string, unknown>): ChatConfig {
     throw new Error("chat.apiKey is required");
   }
 
+  // Resolve api type
+  let api: ChatApi = DEFAULT_CHAT_API;
+  if (typeof chat.api === "string" && chat.api.trim().length > 0) {
+    const raw = chat.api.trim() as string;
+    if (!VALID_CHAT_APIS.includes(raw as ChatApi)) {
+      throw new Error(`chat.api must be one of: ${VALID_CHAT_APIS.join(", ")} (got: "${raw}")`);
+    }
+    api = raw as ChatApi;
+  }
+
+  // Per-API defaults
+  const defaultBaseUrl =
+    api === "anthropic-messages" ? ANTHROPIC_DEFAULT_BASE_URL : DEFAULT_CHAT_BASE_URL;
+  const defaultModel = api === "anthropic-messages" ? ANTHROPIC_DEFAULT_MODEL : DEFAULT_CHAT_MODEL;
+
   return {
-    model: resolveString(chat.model, DEFAULT_CHAT_MODEL),
+    api,
+    model: resolveString(chat.model, defaultModel),
     apiKey: resolveEnvVars(apiKeyRaw.trim()),
-    baseUrl: resolveString(chat.baseUrl, DEFAULT_CHAT_BASE_URL),
+    baseUrl: resolveString(chat.baseUrl, defaultBaseUrl),
   };
 }
 
@@ -197,7 +220,7 @@ export const memoryConfigSchema = {
     let chat: ChatConfig | undefined;
     if (cfg.chat && typeof cfg.chat === "object" && !Array.isArray(cfg.chat)) {
       const chatRaw = cfg.chat as Record<string, unknown>;
-      assertAllowedKeys(chatRaw, ["apiKey", "model", "baseUrl"], "chat config");
+      assertAllowedKeys(chatRaw, ["api", "apiKey", "model", "baseUrl"], "chat config");
       chat = resolveChatConfig(chatRaw);
     }
 
@@ -234,6 +257,11 @@ export const memoryConfigSchema = {
       placeholder: "1536",
       help: "Optional for known models; required for custom models",
       advanced: true,
+    },
+    "chat.api": {
+      label: "Chat API",
+      placeholder: DEFAULT_CHAT_API,
+      help: "API protocol: openai-completions or anthropic-messages",
     },
     "chat.apiKey": {
       label: "Chat API Key",

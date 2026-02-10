@@ -24,6 +24,11 @@
       "help": "Optional for known models; required for custom models",
       "advanced": true
     },
+    "chat.api": {
+      "label": "Chat API Backend",
+      "placeholder": "openai-completions",
+      "help": "API backend: openai-completions (default) or anthropic-messages"
+    },
     "chat.apiKey": {
       "label": "Chat API Key",
       "sensitive": true,
@@ -33,12 +38,12 @@
     "chat.baseUrl": {
       "label": "Chat Base URL",
       "placeholder": "https://api.openai.com/v1",
-      "help": "Base URL for an OpenAI-compatible chat API"
+      "help": "Base URL for the chat API (defaults based on selected backend)"
     },
     "chat.model": {
       "label": "Chat Model",
       "placeholder": "gpt-4o-mini",
-      "help": "Chat model for analyzing conversations and making memory decisions"
+      "help": "Chat model for memory decisions (defaults based on selected backend)"
     },
     "dbPath": {
       "label": "Database Path",
@@ -81,6 +86,10 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "api": {
+            "type": "string",
+            "enum": ["openai-completions", "anthropic-messages"]
+          },
           "apiKey": {
             "type": "string"
           },

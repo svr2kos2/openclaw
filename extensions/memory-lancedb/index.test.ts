@@ -144,6 +144,7 @@ describe("memory plugin e2e", () => {
       dbPath,
     });
 
+    expect(config?.chat?.api).toBe("openai-completions");
     expect(config?.chat?.apiKey).toBe("chat-key");
     expect(config?.chat?.model).toBe("gpt-4o");
     expect(config?.chat?.baseUrl).toBe("https://chat.example.com/v1");
@@ -158,8 +159,36 @@ describe("memory plugin e2e", () => {
       dbPath,
     });
 
+    expect(config?.chat?.api).toBe("openai-completions");
     expect(config?.chat?.model).toBe("gpt-4o-mini");
     expect(config?.chat?.baseUrl).toBe("https://api.openai.com/v1");
+  });
+
+  test("config schema parses anthropic chat config with correct defaults", async () => {
+    const { default: memoryPlugin } = await import("./index.js");
+
+    const config = memoryPlugin.configSchema?.parse?.({
+      embedding: { apiKey: OPENAI_API_KEY },
+      chat: { api: "anthropic-messages", apiKey: "sk-ant-xxx" },
+      dbPath,
+    });
+
+    expect(config?.chat?.api).toBe("anthropic-messages");
+    expect(config?.chat?.apiKey).toBe("sk-ant-xxx");
+    expect(config?.chat?.model).toBe("claude-sonnet-4-5-20250929");
+    expect(config?.chat?.baseUrl).toBe("https://api.anthropic.com");
+  });
+
+  test("config schema rejects invalid chat.api", async () => {
+    const { default: memoryPlugin } = await import("./index.js");
+
+    expect(() => {
+      memoryPlugin.configSchema?.parse?.({
+        embedding: { apiKey: OPENAI_API_KEY },
+        chat: { api: "invalid-api", apiKey: "key" },
+        dbPath,
+      });
+    }).toThrow("chat.api must be one of");
   });
 
   test("shouldCapture and detectCategory are no longer exported (replaced by LLM)", async () => {

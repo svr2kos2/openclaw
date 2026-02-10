@@ -5,10 +5,13 @@
  * The decision model is an internal "Mini-Agent" with private tools
  * (store_memory, forget_memory, update_memory) that operate directly
  * on LanceDB. Errors are fed back to the model for retry.
+ *
+ * Supports two API backends: OpenAI completions and Anthropic messages.
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import type { MemoryCategory } from "./config.js";
+import type { ChatApi, MemoryCategory } from "./config.js";
 import type { CleanMessage, JournalData, MemoryLogEntry } from "./session-journal.js";
 
 // ============================================================================
@@ -40,70 +43,222 @@ type PluginLogger = {
 };
 
 // ============================================================================
-// Internal tool definitions (OpenAI function-calling format)
+// Internal tool schemas (shared between adapters)
 // ============================================================================
 
-const INTERNAL_TOOLS: OpenAI.ChatCompletionTool[] = [
+type InternalToolDef = {
+  name: string;
+  description: string;
+  parameters: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+};
+
+const TOOL_DEFS: InternalToolDef[] = [
   {
-    type: "function",
-    function: {
-      name: "store_memory",
-      description: "Store a new piece of information in long-term memory.",
-      parameters: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "The original conversation text to store" },
-          category: {
-            type: "string",
-            enum: ["preference", "fact", "decision", "entity", "other"],
-            description: "Memory category",
-          },
-          importance: {
-            type: "number",
-            description: "Importance score from 0 to 1",
-          },
+    name: "store_memory",
+    description: "Store a new piece of information in long-term memory.",
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The original conversation text to store" },
+        category: {
+          type: "string",
+          enum: ["preference", "fact", "decision", "entity", "other"],
+          description: "Memory category",
         },
-        required: ["text", "category", "importance"],
+        importance: { type: "number", description: "Importance score from 0 to 1" },
       },
+      required: ["text", "category", "importance"],
     },
   },
   {
-    type: "function",
-    function: {
-      name: "forget_memory",
-      description: "Delete a memory by its ID. Only use when the user explicitly asks to forget.",
-      parameters: {
-        type: "object",
-        properties: {
-          memoryId: { type: "string", description: "UUID of the memory to delete" },
-        },
-        required: ["memoryId"],
+    name: "forget_memory",
+    description: "Delete a memory by its ID. Only use when the user explicitly asks to forget.",
+    parameters: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "UUID of the memory to delete" },
       },
+      required: ["memoryId"],
     },
   },
   {
-    type: "function",
-    function: {
-      name: "update_memory",
-      description:
-        "Update an existing memory (replaces it with new text). Use when new information contradicts or refines a previously stored memory.",
-      parameters: {
-        type: "object",
-        properties: {
-          memoryId: { type: "string", description: "UUID of the memory to update" },
-          text: { type: "string", description: "Updated memory text" },
-          category: {
-            type: "string",
-            enum: ["preference", "fact", "decision", "entity", "other"],
-            description: "Memory category",
-          },
-          importance: { type: "number", description: "Updated importance score 0-1" },
+    name: "update_memory",
+    description:
+      "Update an existing memory (replaces it with new text). Use when new information contradicts or refines a previously stored memory.",
+    parameters: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "UUID of the memory to update" },
+        text: { type: "string", description: "Updated memory text" },
+        category: {
+          type: "string",
+          enum: ["preference", "fact", "decision", "entity", "other"],
+          description: "Memory category",
         },
-        required: ["memoryId", "text", "category", "importance"],
+        importance: { type: "number", description: "Updated importance score 0-1" },
       },
+      required: ["memoryId", "text", "category", "importance"],
     },
   },
 ];
+
+// ============================================================================
+// Chat adapter interface
+// ============================================================================
+
+/** A pending tool call returned by the model. */
+type ToolCallRequest = {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+};
+
+/** Result of a single chat completion round. */
+type AdapterResponse = {
+  toolCalls: ToolCallRequest[];
+  /** True when the model signalled it is done (no more tool calls). */
+  done: boolean;
+};
+
+interface ChatAdapter {
+  /** Run one completion round and return parsed tool calls. */
+  complete(): Promise<AdapterResponse>;
+  /** Push a tool result into the conversation. */
+  pushToolResult(toolCallId: string, content: string, isError: boolean): void;
+}
+
+// ============================================================================
+// OpenAI adapter
+// ============================================================================
+
+class OpenAIAdapter implements ChatAdapter {
+  private client: OpenAI;
+  private messages: OpenAI.ChatCompletionMessageParam[];
+  private tools: OpenAI.ChatCompletionTool[];
+
+  constructor(
+    private readonly model: string,
+    apiKey: string,
+    baseUrl: string,
+    systemPrompt: string,
+    userPrompt: string,
+  ) {
+    this.client = new OpenAI({ apiKey, baseURL: baseUrl });
+    this.messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ];
+    this.tools = TOOL_DEFS.map((t) => ({
+      type: "function" as const,
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
+  }
+
+  async complete(): Promise<AdapterResponse> {
+    const response = await this.client.chat.completions.create({
+      model: this.model,
+      messages: this.messages,
+      tools: this.tools,
+      tool_choice: "auto",
+    });
+
+    const choice = response.choices[0];
+    if (!choice) return { toolCalls: [], done: true };
+
+    this.messages.push(choice.message);
+
+    const toolCalls: ToolCallRequest[] = [];
+    if (choice.message.tool_calls) {
+      for (const tc of choice.message.tool_calls) {
+        if (tc.type !== "function") continue;
+        toolCalls.push({
+          id: tc.id,
+          name: tc.function.name,
+          args: JSON.parse(tc.function.arguments) as Record<string, unknown>,
+        });
+      }
+    }
+
+    return {
+      toolCalls,
+      done: toolCalls.length === 0 || choice.finish_reason === "stop",
+    };
+  }
+
+  pushToolResult(toolCallId: string, content: string, _isError: boolean): void {
+    this.messages.push({ role: "tool", tool_call_id: toolCallId, content });
+  }
+}
+
+// ============================================================================
+// Anthropic adapter
+// ============================================================================
+
+class AnthropicAdapter implements ChatAdapter {
+  private client: Anthropic;
+  private messages: Anthropic.Messages.MessageParam[];
+  private tools: Anthropic.Messages.Tool[];
+  private systemPrompt: string;
+
+  constructor(
+    private readonly model: string,
+    apiKey: string,
+    baseUrl: string,
+    systemPrompt: string,
+    userPrompt: string,
+  ) {
+    this.client = new Anthropic({ apiKey, baseURL: baseUrl });
+    this.systemPrompt = systemPrompt;
+    this.messages = [{ role: "user", content: userPrompt }];
+    this.tools = TOOL_DEFS.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.parameters as Anthropic.Messages.Tool.InputSchema,
+    }));
+  }
+
+  async complete(): Promise<AdapterResponse> {
+    const response = await this.client.messages.create({
+      model: this.model,
+      max_tokens: 4096,
+      system: this.systemPrompt,
+      messages: this.messages,
+      tools: this.tools,
+      tool_choice: { type: "auto" },
+    });
+
+    // Append assistant reply to conversation
+    this.messages.push({ role: "assistant", content: response.content });
+
+    const toolCalls: ToolCallRequest[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        toolCalls.push({
+          id: block.id,
+          name: block.name,
+          args: block.input as Record<string, unknown>,
+        });
+      }
+    }
+
+    return {
+      toolCalls,
+      done: toolCalls.length === 0 || response.stop_reason !== "tool_use",
+    };
+  }
+
+  pushToolResult(toolCallId: string, content: string, isError: boolean): void {
+    // Anthropic expects tool results as content blocks inside a user message
+    this.messages.push({
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: toolCallId, content, is_error: isError }],
+    });
+  }
+}
 
 // ============================================================================
 // System prompt
@@ -130,17 +285,14 @@ RULES:
 const MAX_TOOL_ITERATIONS = 5;
 
 export class LLMDecisionMaker {
-  private client: OpenAI;
-
   constructor(
+    private readonly api: ChatApi,
     private readonly model: string,
-    apiKey: string,
-    baseUrl: string,
+    private readonly apiKey: string,
+    private readonly baseUrl: string,
     private readonly ops: MemoryOps,
     private readonly logger: PluginLogger,
-  ) {
-    this.client = new OpenAI({ apiKey, baseURL: baseUrl });
-  }
+  ) {}
 
   /**
    * Evaluate a journal's delta and execute memory operations via tool calls.
@@ -155,61 +307,28 @@ export class LLMDecisionMaker {
     const logs: MemoryLogEntry[] = [];
     const now = Date.now();
 
-    const messages: OpenAI.ChatCompletionMessageParam[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userPrompt },
-    ];
+    // Create the appropriate adapter
+    const adapter: ChatAdapter =
+      this.api === "anthropic-messages"
+        ? new AnthropicAdapter(this.model, this.apiKey, this.baseUrl, SYSTEM_PROMPT, userPrompt)
+        : new OpenAIAdapter(this.model, this.apiKey, this.baseUrl, SYSTEM_PROMPT, userPrompt);
 
     for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        messages,
-        tools: INTERNAL_TOOLS,
-        tool_choice: "auto",
-      });
+      const response = await adapter.complete();
 
-      const choice = response.choices[0];
-      if (!choice) break;
-
-      const assistantMsg = choice.message;
-      // Push the assistant response (including any tool_calls) back into history
-      messages.push(assistantMsg);
-
-      // No tool calls → model is done
-      if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
+      if (response.toolCalls.length === 0 || response.done) {
+        // Execute any final tool calls before breaking
+        for (const tc of response.toolCalls) {
+          const log = await this.handleToolCall(tc, journal.cleanContext.length, now, adapter);
+          if (log) logs.push(log);
+        }
         break;
       }
 
-      // Execute each tool call and feed results back
-      for (const toolCall of assistantMsg.tool_calls) {
-        // Only handle function-type tool calls
-        if (toolCall.type !== "function") continue;
-        const { name, arguments: argsStr } = toolCall.function;
-        let resultText: string;
-
-        try {
-          const args = JSON.parse(argsStr) as Record<string, unknown>;
-          const log = await this.executeTool(name, args, journal.cleanContext.length);
-          if (log) {
-            log.timestamp = now;
-            logs.push(log);
-          }
-          resultText = log ? `Success: ${log.action} memory ${log.memoryId}` : "No action taken.";
-        } catch (err) {
-          // Return error to model so it can retry or correct
-          resultText = `Error: ${String(err instanceof Error ? err.message : err)}`;
-          this.logger.warn(`memory-lancedb: tool ${name} failed: ${resultText}`);
-        }
-
-        messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id,
-          content: resultText,
-        });
+      for (const tc of response.toolCalls) {
+        const log = await this.handleToolCall(tc, journal.cleanContext.length, now, adapter);
+        if (log) logs.push(log);
       }
-
-      // If model indicated it's done, stop iterating
-      if (choice.finish_reason === "stop") break;
     }
 
     return { logs };
@@ -218,6 +337,28 @@ export class LLMDecisionMaker {
   // --------------------------------------------------------------------------
   // Internals
   // --------------------------------------------------------------------------
+
+  private async handleToolCall(
+    tc: ToolCallRequest,
+    deltaIndex: number,
+    now: number,
+    adapter: ChatAdapter,
+  ): Promise<MemoryLogEntry | null> {
+    try {
+      const log = await this.executeTool(tc.name, tc.args, deltaIndex);
+      if (log) log.timestamp = now;
+      const resultText = log
+        ? `Success: ${log.action} memory ${log.memoryId}`
+        : "No action taken.";
+      adapter.pushToolResult(tc.id, resultText, false);
+      return log;
+    } catch (err) {
+      const resultText = `Error: ${String(err instanceof Error ? err.message : err)}`;
+      this.logger.warn(`memory-lancedb: tool ${tc.name} failed: ${resultText}`);
+      adapter.pushToolResult(tc.id, resultText, true);
+      return null;
+    }
+  }
 
   private async executeTool(
     name: string,
