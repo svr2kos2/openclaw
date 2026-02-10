@@ -6,7 +6,7 @@
   "type": "module",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "@lancedb/lancedb": "^0.26.20",
+    "@lancedb/lancedb": "^0.26.2",
     "@sinclair/typebox": "0.34.48",
     "openai": "^6.18.0"
   },
