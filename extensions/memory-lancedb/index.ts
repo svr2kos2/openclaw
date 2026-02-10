@@ -563,13 +563,17 @@ const memoryPlugin = {
             return;
           }
 
-          const sessionKey = ctx.sessionKey;
+          const sessionKey = ctx.sessionId ?? ctx.sessionKey;
           if (!sessionKey) {
-            api.logger.warn("memory-lancedb: no sessionKey in agent_end context, skipping capture");
+            api.logger.warn(
+              "memory-lancedb: no sessionId/sessionKey in agent_end context, skipping capture",
+            );
             return;
           }
 
-          api.logger.info(`memory-lancedb: processing session=${sessionKey}`);
+          api.logger.info(
+            `memory-lancedb: using sessionId=${ctx.sessionId ?? "(none)"} (fallback sessionKey=${ctx.sessionKey ?? "(none)"})`,
+          );
 
           try {
             // Extract user/assistant plain text from the event messages

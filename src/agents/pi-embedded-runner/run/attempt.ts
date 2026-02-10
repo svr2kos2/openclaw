@@ -862,6 +862,7 @@ export async function runEmbeddedAttempt(
               },
               {
                 agentId: hookAgentId,
+                sessionId: params.sessionId,
                 sessionKey: params.sessionKey,
                 workspaceDir: params.workspaceDir,
                 messageProvider: params.messageProvider ?? undefined,

@@ -314,6 +314,7 @@ export type PluginHookName =
 // Agent context shared across agent hooks
 export type PluginHookAgentContext = {
   agentId?: string;
+  sessionId?: string;
   sessionKey?: string;
   workspaceDir?: string;
   messageProvider?: string;
