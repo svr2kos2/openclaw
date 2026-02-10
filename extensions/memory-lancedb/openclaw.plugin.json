@@ -3,15 +3,42 @@
   "kind": "memory",
   "uiHints": {
     "embedding.apiKey": {
-      "label": "OpenAI API Key",
+      "label": "Embedding API Key",
       "sensitive": true,
-      "placeholder": "sk-proj-...",
-      "help": "API key for OpenAI embeddings (or use ${OPENAI_API_KEY})"
+      "placeholder": "sk-...",
+      "help": "API key for your OpenAI-compatible embeddings endpoint (supports ${ENV_VAR})"
+    },
+    "embedding.baseUrl": {
+      "label": "Embedding Base URL",
+      "placeholder": "https://api.openai.com/v1",
+      "help": "Base URL for an OpenAI-compatible embeddings API"
     },
     "embedding.model": {
       "label": "Embedding Model",
       "placeholder": "text-embedding-3-small",
-      "help": "OpenAI embedding model to use"
+      "help": "Embedding model name to call on the configured endpoint"
+    },
+    "embedding.dimensions": {
+      "label": "Vector Dimensions",
+      "placeholder": "1536",
+      "help": "Optional for known models; required for custom models",
+      "advanced": true
+    },
+    "chat.apiKey": {
+      "label": "Chat API Key",
+      "sensitive": true,
+      "placeholder": "sk-...",
+      "help": "API key for the LLM used for memory decisions (supports ${ENV_VAR})"
+    },
+    "chat.baseUrl": {
+      "label": "Chat Base URL",
+      "placeholder": "https://api.openai.com/v1",
+      "help": "Base URL for an OpenAI-compatible chat API"
+    },
+    "chat.model": {
+      "label": "Chat Model",
+      "placeholder": "gpt-4o-mini",
+      "help": "Chat model for analyzing conversations and making memory decisions"
     },
     "dbPath": {
       "label": "Database Path",
@@ -20,7 +47,7 @@
     },
     "autoCapture": {
       "label": "Auto-Capture",
-      "help": "Automatically capture important information from conversations"
+      "help": "Automatically capture important information via LLM analysis (requires chat config)"
     },
     "autoRecall": {
       "label": "Auto-Recall",
@@ -38,9 +65,30 @@
           "apiKey": {
             "type": "string"
           },
+          "baseUrl": {
+            "type": "string"
+          },
           "model": {
-            "type": "string",
-            "enum": ["text-embedding-3-small", "text-embedding-3-large"]
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "number"
+          }
+        },
+        "required": ["apiKey"]
+      },
+      "chat": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "apiKey": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
           }
         },
         "required": ["apiKey"]

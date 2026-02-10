@@ -60,25 +60,30 @@ describe("memory plugin e2e", () => {
 
     expect(config).toBeDefined();
     expect(config?.embedding?.apiKey).toBe(OPENAI_API_KEY);
+    expect(config?.embedding?.baseUrl).toBe("https://api.openai.com/v1");
+    expect(config?.embedding?.dimensions).toBe(1536);
     expect(config?.dbPath).toBe(dbPath);
   });
 
   test("config schema resolves env vars", async () => {
     const { default: memoryPlugin } = await import("./index.js");
 
-    // Set a test env var
     process.env.TEST_MEMORY_API_KEY = "test-key-123";
+    process.env.TEST_MEMORY_BASE_URL = "https://embeddings.example.com/v1";
 
     const config = memoryPlugin.configSchema?.parse?.({
       embedding: {
         apiKey: "${TEST_MEMORY_API_KEY}",
+        baseUrl: "${TEST_MEMORY_BASE_URL}",
       },
       dbPath,
     });
 
     expect(config?.embedding?.apiKey).toBe("test-key-123");
+    expect(config?.embedding?.baseUrl).toBe("https://embeddings.example.com/v1");
 
     delete process.env.TEST_MEMORY_API_KEY;
+    delete process.env.TEST_MEMORY_BASE_URL;
   });
 
   test("config schema rejects missing apiKey", async () => {
@@ -92,28 +97,76 @@ describe("memory plugin e2e", () => {
     }).toThrow("embedding.apiKey is required");
   });
 
-  test("shouldCapture applies real capture rules", async () => {
-    const { shouldCapture } = await import("./index.js");
+  test("config schema supports custom endpoint and custom model", async () => {
+    const { default: memoryPlugin } = await import("./index.js");
 
-    expect(shouldCapture("I prefer dark mode")).toBe(true);
-    expect(shouldCapture("Remember that my name is John")).toBe(true);
-    expect(shouldCapture("My email is test@example.com")).toBe(true);
-    expect(shouldCapture("Call me at +1234567890123")).toBe(true);
-    expect(shouldCapture("I always want verbose output")).toBe(true);
-    expect(shouldCapture("x")).toBe(false);
-    expect(shouldCapture("<relevant-memories>injected</relevant-memories>")).toBe(false);
-    expect(shouldCapture("<system>status</system>")).toBe(false);
-    expect(shouldCapture("Here is a short **summary**\n- bullet")).toBe(false);
+    const config = memoryPlugin.configSchema?.parse?.({
+      embedding: {
+        apiKey: OPENAI_API_KEY,
+        baseUrl: "https://custom-embeddings.example.com/v1",
+        model: "my-custom-embedding-model",
+        dimensions: 1024,
+      },
+      dbPath,
+    });
+
+    expect(config?.embedding?.baseUrl).toBe("https://custom-embeddings.example.com/v1");
+    expect(config?.embedding?.model).toBe("my-custom-embedding-model");
+    expect(config?.embedding?.dimensions).toBe(1024);
   });
 
-  test("detectCategory classifies using production logic", async () => {
-    const { detectCategory } = await import("./index.js");
+  test("config schema requires dimensions for unknown models", async () => {
+    const { default: memoryPlugin } = await import("./index.js");
 
-    expect(detectCategory("I prefer dark mode")).toBe("preference");
-    expect(detectCategory("We decided to use React")).toBe("decision");
-    expect(detectCategory("My email is test@example.com")).toBe("entity");
-    expect(detectCategory("The server is running on port 3000")).toBe("fact");
-    expect(detectCategory("Random note")).toBe("other");
+    expect(() => {
+      memoryPlugin.configSchema?.parse?.({
+        embedding: {
+          apiKey: OPENAI_API_KEY,
+          model: "my-custom-embedding-model",
+        },
+        dbPath,
+      });
+    }).toThrow("embedding.dimensions is required");
+  });
+
+  test("config schema parses chat config", async () => {
+    const { default: memoryPlugin } = await import("./index.js");
+
+    const config = memoryPlugin.configSchema?.parse?.({
+      embedding: {
+        apiKey: OPENAI_API_KEY,
+      },
+      chat: {
+        apiKey: "chat-key",
+        model: "gpt-4o",
+        baseUrl: "https://chat.example.com/v1",
+      },
+      dbPath,
+    });
+
+    expect(config?.chat?.apiKey).toBe("chat-key");
+    expect(config?.chat?.model).toBe("gpt-4o");
+    expect(config?.chat?.baseUrl).toBe("https://chat.example.com/v1");
+  });
+
+  test("config schema defaults chat model when only apiKey given", async () => {
+    const { default: memoryPlugin } = await import("./index.js");
+
+    const config = memoryPlugin.configSchema?.parse?.({
+      embedding: { apiKey: OPENAI_API_KEY },
+      chat: { apiKey: "chat-key" },
+      dbPath,
+    });
+
+    expect(config?.chat?.model).toBe("gpt-4o-mini");
+    expect(config?.chat?.baseUrl).toBe("https://api.openai.com/v1");
+  });
+
+  test("shouldCapture and detectCategory are no longer exported (replaced by LLM)", async () => {
+    const mod = await import("./index.js");
+    // Old regex-based functions should not exist
+    expect((mod as Record<string, unknown>).shouldCapture).toBeUndefined();
+    expect((mod as Record<string, unknown>).detectCategory).toBeUndefined();
   });
 });
 

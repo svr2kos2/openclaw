@@ -2,7 +2,7 @@
  * OpenClaw Memory (LanceDB) Plugin
  *
  * Long-term memory with vector search for AI conversations.
- * Uses LanceDB for storage and OpenAI for embeddings.
+ * Uses LanceDB for storage and OpenAI-compatible embedding APIs.
  * Provides seamless auto-recall and auto-capture via lifecycle hooks.
  */
 
@@ -12,12 +12,9 @@ import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import { stringEnum } from "openclaw/plugin-sdk";
-import {
-  MEMORY_CATEGORIES,
-  type MemoryCategory,
-  memoryConfigSchema,
-  vectorDimsForModel,
-} from "./config.js";
+import { MEMORY_CATEGORIES, type MemoryCategory, memoryConfigSchema } from "./config.js";
+import { LLMDecisionMaker, type MemoryOps } from "./decision-maker.js";
+import { SessionJournal, type CleanMessage } from "./session-journal.js";
 
 // ============================================================================
 // Types
@@ -157,7 +154,7 @@ class MemoryDB {
 }
 
 // ============================================================================
-// OpenAI Embeddings
+// OpenAI-Compatible Embeddings
 // ============================================================================
 
 class Embeddings {
@@ -165,9 +162,10 @@ class Embeddings {
 
   constructor(
     apiKey: string,
-    private model: string,
+    private readonly model: string,
+    baseUrl: string,
   ) {
-    this.client = new OpenAI({ apiKey });
+    this.client = new OpenAI({ apiKey, baseURL: baseUrl });
   }
 
   async embed(text: string): Promise<number[]> {
@@ -180,60 +178,47 @@ class Embeddings {
 }
 
 // ============================================================================
-// Rule-based capture filter
+// Message extraction helper
 // ============================================================================
 
-const MEMORY_TRIGGERS = [
-  /zapamatuj si|pamatuj|remember/i,
-  /preferuji|radši|nechci|prefer/i,
-  /rozhodli jsme|budeme používat/i,
-  /\+\d{10,}/,
-  /[\w.-]+@[\w.-]+\.\w+/,
-  /můj\s+\w+\s+je|je\s+můj/i,
-  /my\s+\w+\s+is|is\s+my/i,
-  /i (like|prefer|hate|love|want|need)/i,
-  /always|never|important/i,
-];
+/** Extract user/assistant plain-text messages from an agent event's message array. */
+function extractCleanMessages(messages: unknown[]): CleanMessage[] {
+  const result: CleanMessage[] = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") continue;
+    const msgObj = msg as Record<string, unknown>;
+    const role = msgObj.role;
+    if (role !== "user" && role !== "assistant") continue;
 
-export function shouldCapture(text: string): boolean {
-  if (text.length < 10 || text.length > 500) {
-    return false;
-  }
-  // Skip injected context from memory recall
-  if (text.includes("<relevant-memories>")) {
-    return false;
-  }
-  // Skip system-generated content
-  if (text.startsWith("<") && text.includes("</")) {
-    return false;
-  }
-  // Skip agent summary responses (contain markdown formatting)
-  if (text.includes("**") && text.includes("\n-")) {
-    return false;
-  }
-  // Skip emoji-heavy responses (likely agent output)
-  const emojiCount = (text.match(/[\u{1F300}-\u{1F9FF}]/gu) || []).length;
-  if (emojiCount > 3) {
-    return false;
-  }
-  return MEMORY_TRIGGERS.some((r) => r.test(text));
-}
+    const content = msgObj.content;
 
-export function detectCategory(text: string): MemoryCategory {
-  const lower = text.toLowerCase();
-  if (/prefer|radši|like|love|hate|want/i.test(lower)) {
-    return "preference";
+    if (typeof content === "string") {
+      const text = content.trim();
+      if (text.length > 0 && !text.includes("<relevant-memories>")) {
+        result.push({ role: role as "user" | "assistant", text });
+      }
+      continue;
+    }
+
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (
+          block &&
+          typeof block === "object" &&
+          "type" in block &&
+          (block as Record<string, unknown>).type === "text" &&
+          "text" in block &&
+          typeof (block as Record<string, unknown>).text === "string"
+        ) {
+          const text = ((block as Record<string, unknown>).text as string).trim();
+          if (text.length > 0 && !text.includes("<relevant-memories>")) {
+            result.push({ role: role as "user" | "assistant", text });
+          }
+        }
+      }
+    }
   }
-  if (/rozhodli|decided|will use|budeme/i.test(lower)) {
-    return "decision";
-  }
-  if (/\+\d{10,}|@[\w.-]+\.\w+|is called|jmenuje se/i.test(lower)) {
-    return "entity";
-  }
-  if (/is|are|has|have|je|má|jsou/i.test(lower)) {
-    return "fact";
-  }
-  return "other";
+  return result;
 }
 
 // ============================================================================
@@ -249,12 +234,17 @@ const memoryPlugin = {
 
   register(api: OpenClawPluginApi) {
     const cfg = memoryConfigSchema.parse(api.pluginConfig);
-    const resolvedDbPath = api.resolvePath(cfg.dbPath!);
-    const vectorDim = vectorDimsForModel(cfg.embedding.model ?? "text-embedding-3-small");
-    const db = new MemoryDB(resolvedDbPath, vectorDim);
-    const embeddings = new Embeddings(cfg.embedding.apiKey, cfg.embedding.model!);
+    const resolvedDbPath = api.resolvePath(cfg.dbPath);
+    const db = new MemoryDB(resolvedDbPath, cfg.embedding.dimensions);
+    const embeddings = new Embeddings(
+      cfg.embedding.apiKey,
+      cfg.embedding.model,
+      cfg.embedding.baseUrl,
+    );
 
-    api.logger.info(`memory-lancedb: plugin registered (db: ${resolvedDbPath}, lazy init)`);
+    api.logger.info(
+      `memory-lancedb: plugin registered (db: ${resolvedDbPath}, model: ${cfg.embedding.model}, baseUrl: ${cfg.embedding.baseUrl}, lazy init)`,
+    );
 
     // ========================================================================
     // Tools
@@ -517,88 +507,90 @@ const memoryPlugin = {
       });
     }
 
-    // Auto-capture: analyze and store important information after agent ends
+    // Auto-capture: LLM-based analysis of conversations for memory capture
     if (cfg.autoCapture) {
-      api.on("agent_end", async (event) => {
-        if (!event.success || !event.messages || event.messages.length === 0) {
-          return;
-        }
+      if (!cfg.chat) {
+        api.logger.warn(
+          "memory-lancedb: autoCapture enabled but no chat config provided. " +
+            "Add a 'chat' section with apiKey/model/baseUrl to enable LLM-based capture.",
+        );
+      } else {
+        const journal = new SessionJournal(resolvedDbPath);
 
-        try {
-          // Extract text content from messages (handling unknown[] type)
-          const texts: string[] = [];
-          for (const msg of event.messages) {
-            // Type guard for message object
-            if (!msg || typeof msg !== "object") {
-              continue;
+        // Build memory operations for the decision maker
+        const ops: MemoryOps = {
+          async store(text, category, importance) {
+            const vector = await embeddings.embed(text);
+            // Check for near-duplicates
+            const existing = await db.search(vector, 1, 0.95);
+            if (existing.length > 0) {
+              throw new Error(
+                `Similar memory already exists: "${existing[0].entry.text.slice(0, 60)}" ` +
+                  `(id: ${existing[0].entry.id}). Use update_memory to modify it.`,
+              );
             }
-            const msgObj = msg as Record<string, unknown>;
+            const entry = await db.store({ text, vector, importance, category });
+            return entry.id;
+          },
+          async forget(memoryId) {
+            return db.delete(memoryId);
+          },
+          async update(memoryId, text, category, importance) {
+            // delete + re-embed + insert (holding the session queue lock)
+            await db.delete(memoryId);
+            const vector = await embeddings.embed(text);
+            const entry = await db.store({ text, vector, importance, category });
+            return entry.id;
+          },
+        };
 
-            // Only process user and assistant messages
-            const role = msgObj.role;
-            if (role !== "user" && role !== "assistant") {
-              continue;
-            }
+        const decisionMaker = new LLMDecisionMaker(
+          cfg.chat.model,
+          cfg.chat.apiKey,
+          cfg.chat.baseUrl,
+          ops,
+          api.logger,
+        );
 
-            const content = msgObj.content;
-
-            // Handle string content directly
-            if (typeof content === "string") {
-              texts.push(content);
-              continue;
-            }
-
-            // Handle array content (content blocks)
-            if (Array.isArray(content)) {
-              for (const block of content) {
-                if (
-                  block &&
-                  typeof block === "object" &&
-                  "type" in block &&
-                  (block as Record<string, unknown>).type === "text" &&
-                  "text" in block &&
-                  typeof (block as Record<string, unknown>).text === "string"
-                ) {
-                  texts.push((block as Record<string, unknown>).text as string);
-                }
-              }
-            }
-          }
-
-          // Filter for capturable content
-          const toCapture = texts.filter((text) => text && shouldCapture(text));
-          if (toCapture.length === 0) {
+        api.on("agent_end", async (event, ctx) => {
+          if (!event.success || !event.messages || event.messages.length === 0) {
             return;
           }
 
-          // Store each capturable piece (limit to 3 per conversation)
-          let stored = 0;
-          for (const text of toCapture.slice(0, 3)) {
-            const category = detectCategory(text);
-            const vector = await embeddings.embed(text);
+          const sessionKey = ctx.sessionKey;
+          if (!sessionKey) {
+            api.logger.warn("memory-lancedb: no sessionKey in agent_end context, skipping capture");
+            return;
+          }
 
-            // Check for duplicates (high similarity threshold)
-            const existing = await db.search(vector, 1, 0.95);
-            if (existing.length > 0) {
-              continue;
+          try {
+            // Extract user/assistant plain text from the event messages
+            const cleanMsgs = extractCleanMessages(event.messages);
+            if (cleanMsgs.length === 0) return;
+
+            // Append to journal and get unprocessed delta
+            const { journal: journalData, delta } = await journal.appendMessages(
+              sessionKey,
+              cleanMsgs,
+            );
+            if (delta.length === 0) return;
+
+            // Run LLM decision maker on the delta
+            const { logs } = await decisionMaker.evaluate(journalData, delta);
+
+            // Commit decisions (advance processedIndex + save logs)
+            await journal.commitDecisions(sessionKey, logs, journalData.cleanContext.length);
+
+            if (logs.length > 0) {
+              api.logger.info(
+                `memory-lancedb: auto-captured ${logs.length} memory operations via LLM`,
+              );
             }
-
-            await db.store({
-              text,
-              vector,
-              importance: 0.7,
-              category,
-            });
-            stored++;
+          } catch (err) {
+            api.logger.warn(`memory-lancedb: LLM capture failed: ${String(err)}`);
           }
-
-          if (stored > 0) {
-            api.logger.info(`memory-lancedb: auto-captured ${stored} memories`);
-          }
-        } catch (err) {
-          api.logger.warn(`memory-lancedb: capture failed: ${String(err)}`);
-        }
-      });
+        });
+      }
     }
 
     // ========================================================================
@@ -609,7 +601,7 @@ const memoryPlugin = {
       id: "memory-lancedb",
       start: () => {
         api.logger.info(
-          `memory-lancedb: initialized (db: ${resolvedDbPath}, model: ${cfg.embedding.model})`,
+          `memory-lancedb: initialized (db: ${resolvedDbPath}, model: ${cfg.embedding.model}, baseUrl: ${cfg.embedding.baseUrl})`,
         );
       },
       stop: () => {
