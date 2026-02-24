@@ -3,6 +3,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import {
   applyModelAllowlist,
   applyModelFallbacksFromSelection,
+  pruneKilocodeProviderModelsToAllowlist,
   promptDefaultModel,
   promptModelAllowlist,
 } from "./model-picker.js";
@@ -20,9 +21,13 @@ const ensureAuthProfileStore = vi.hoisted(() =>
   })),
 );
 const listProfilesForProvider = vi.hoisted(() => vi.fn(() => []));
+const upsertAuthProfile = vi.hoisted(() => vi.fn());
+const upsertAuthProfileWithLock = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("../agents/auth-profiles.js", () => ({
   ensureAuthProfileStore,
   listProfilesForProvider,
+  upsertAuthProfile,
+  upsertAuthProfileWithLock,
 }));
 
 const resolveEnvApiKey = vi.hoisted(() => vi.fn(() => undefined));
@@ -32,76 +37,93 @@ vi.mock("../agents/model-auth.js", () => ({
   getCustomProviderApiKey,
 }));
 
+const OPENROUTER_CATALOG = [
+  {
+    provider: "openrouter",
+    id: "auto",
+    name: "OpenRouter Auto",
+  },
+  {
+    provider: "openrouter",
+    id: "meta-llama/llama-3.3-70b:free",
+    name: "Llama 3.3 70B",
+  },
+] as const;
+
+function expectRouterModelFiltering(options: Array<{ value: string }>) {
+  expect(options.some((opt) => opt.value === "openrouter/auto")).toBe(false);
+  expect(options.some((opt) => opt.value === "openrouter/meta-llama/llama-3.3-70b:free")).toBe(
+    true,
+  );
+}
+
+function createSelectAllMultiselect() {
+  return vi.fn(async (params) => params.options.map((option: { value: string }) => option.value));
+}
+
+function makeProviderModel(id: string, name: string) {
+  return {
+    id,
+    name,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+  };
+}
+
 describe("promptDefaultModel", () => {
-  it("filters internal router models from the selection list", async () => {
+  it("supports configuring vLLM during onboarding", async () => {
     loadModelCatalog.mockResolvedValue([
       {
-        provider: "openrouter",
-        id: "auto",
-        name: "OpenRouter Auto",
-      },
-      {
-        provider: "openrouter",
-        id: "meta-llama/llama-3.3-70b:free",
-        name: "Llama 3.3 70B",
+        provider: "anthropic",
+        id: "claude-sonnet-4-5",
+        name: "Claude Sonnet 4.5",
       },
     ]);
 
     const select = vi.fn(async (params) => {
-      const first = params.options[0];
-      return first?.value ?? "";
+      const vllm = params.options.find((opt: { value: string }) => opt.value === "__vllm__");
+      return (vllm?.value ?? "") as never;
     });
-    const prompter = makePrompter({ select });
+    const text = vi
+      .fn()
+      .mockResolvedValueOnce("http://127.0.0.1:8000/v1")
+      .mockResolvedValueOnce("sk-vllm-test")
+      .mockResolvedValueOnce("meta-llama/Meta-Llama-3-8B-Instruct");
+    const prompter = makePrompter({ select, text: text as never });
     const config = { agents: { defaults: {} } } as OpenClawConfig;
 
-    await promptDefaultModel({
+    const result = await promptDefaultModel({
       config,
       prompter,
       allowKeep: false,
       includeManual: false,
+      includeVllm: true,
       ignoreAllowlist: true,
+      agentDir: "/tmp/openclaw-agent",
     });
 
-    const options = select.mock.calls[0]?.[0]?.options ?? [];
-    expect(options.some((opt) => opt.value === "openrouter/auto")).toBe(false);
-    expect(options.some((opt) => opt.value === "openrouter/meta-llama/llama-3.3-70b:free")).toBe(
-      true,
+    expect(upsertAuthProfileWithLock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileId: "vllm:default",
+        credential: expect.objectContaining({ provider: "vllm" }),
+      }),
     );
+    expect(result.model).toBe("vllm/meta-llama/Meta-Llama-3-8B-Instruct");
+    expect(result.config?.models?.providers?.vllm).toMatchObject({
+      baseUrl: "http://127.0.0.1:8000/v1",
+      api: "openai-completions",
+      apiKey: "VLLM_API_KEY",
+      models: [
+        { id: "meta-llama/Meta-Llama-3-8B-Instruct", name: "meta-llama/Meta-Llama-3-8B-Instruct" },
+      ],
+    });
   });
 });
 
 describe("promptModelAllowlist", () => {
-  it("filters internal router models from the selection list", async () => {
-    loadModelCatalog.mockResolvedValue([
-      {
-        provider: "openrouter",
-        id: "auto",
-        name: "OpenRouter Auto",
-      },
-      {
-        provider: "openrouter",
-        id: "meta-llama/llama-3.3-70b:free",
-        name: "Llama 3.3 70B",
-      },
-    ]);
-
-    const multiselect = vi.fn(async (params) =>
-      params.options.map((option: { value: string }) => option.value),
-    );
-    const prompter = makePrompter({ multiselect });
-    const config = { agents: { defaults: {} } } as OpenClawConfig;
-
-    await promptModelAllowlist({ config, prompter });
-
-    const options = multiselect.mock.calls[0]?.[0]?.options ?? [];
-    expect(options.some((opt: { value: string }) => opt.value === "openrouter/auto")).toBe(false);
-    expect(
-      options.some(
-        (opt: { value: string }) => opt.value === "openrouter/meta-llama/llama-3.3-70b:free",
-      ),
-    ).toBe(true);
-  });
-
   it("filters to allowed keys when provided", async () => {
     loadModelCatalog.mockResolvedValue([
       {
@@ -121,9 +143,7 @@ describe("promptModelAllowlist", () => {
       },
     ]);
 
-    const multiselect = vi.fn(async (params) =>
-      params.options.map((option: { value: string }) => option.value),
-    );
+    const multiselect = createSelectAllMultiselect();
     const prompter = makePrompter({ multiselect });
     const config = { agents: { defaults: {} } } as OpenClawConfig;
 
@@ -137,6 +157,37 @@ describe("promptModelAllowlist", () => {
     expect(options.map((opt: { value: string }) => opt.value)).toEqual([
       "anthropic/claude-opus-4-5",
     ]);
+  });
+});
+
+describe("router model filtering", () => {
+  it("filters internal router models in both default and allowlist prompts", async () => {
+    loadModelCatalog.mockResolvedValue(OPENROUTER_CATALOG);
+
+    const select = vi.fn(async (params) => {
+      const first = params.options[0];
+      return first?.value ?? "";
+    });
+    const multiselect = createSelectAllMultiselect();
+    const defaultPrompter = makePrompter({ select });
+    const allowlistPrompter = makePrompter({ multiselect });
+    const config = { agents: { defaults: {} } } as OpenClawConfig;
+
+    await promptDefaultModel({
+      config,
+      prompter: defaultPrompter,
+      allowKeep: false,
+      includeManual: false,
+      ignoreAllowlist: true,
+    });
+    await promptModelAllowlist({ config, prompter: allowlistPrompter });
+
+    const defaultOptions = select.mock.calls[0]?.[0]?.options ?? [];
+    expectRouterModelFiltering(defaultOptions);
+
+    const allowlistCall = multiselect.mock.calls[0]?.[0];
+    expectRouterModelFiltering(allowlistCall?.options as Array<{ value: string }>);
+    expect(allowlistCall?.searchable).toBe(true);
   });
 });
 
@@ -209,5 +260,62 @@ describe("applyModelFallbacksFromSelection", () => {
       primary: "anthropic/claude-opus-4-5",
       fallbacks: ["openai/gpt-5.2"],
     });
+  });
+});
+
+describe("pruneKilocodeProviderModelsToAllowlist", () => {
+  it("keeps only selected model definitions in provider configs", () => {
+    const config = {
+      models: {
+        providers: {
+          kilocode: {
+            baseUrl: "https://api.kilo.ai/api/gateway/",
+            api: "openai-completions",
+            models: [
+              makeProviderModel("anthropic/claude-opus-4.6", "Claude Opus 4.6"),
+              makeProviderModel("minimax/minimax-m2.5:free", "MiniMax M2.5 (Free)"),
+            ],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const next = pruneKilocodeProviderModelsToAllowlist(config, [
+      "kilocode/anthropic/claude-opus-4.6",
+    ]);
+
+    expect(next.models?.providers?.kilocode?.models?.map((model) => model.id)).toEqual([
+      "anthropic/claude-opus-4.6",
+    ]);
+  });
+
+  it("does not modify non-kilo provider model catalogs", () => {
+    const config = {
+      models: {
+        providers: {
+          kilocode: {
+            baseUrl: "https://api.kilo.ai/api/gateway/",
+            api: "openai-completions",
+            models: [makeProviderModel("anthropic/claude-opus-4.6", "Claude Opus 4.6")],
+          },
+          minimax: {
+            baseUrl: "https://api.minimax.io/anthropic",
+            api: "anthropic-messages",
+            models: [makeProviderModel("MiniMax-M2.5", "MiniMax M2.5")],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const next = pruneKilocodeProviderModelsToAllowlist(config, [
+      "kilocode/anthropic/claude-opus-4.6",
+    ]);
+
+    expect(next.models?.providers?.kilocode?.models?.map((model) => model.id)).toEqual([
+      "anthropic/claude-opus-4.6",
+    ]);
+    expect(next.models?.providers?.minimax?.models?.map((model) => model.id)).toEqual([
+      "MiniMax-M2.5",
+    ]);
   });
 });
