@@ -24,7 +24,7 @@ describe("sanitizeToolsForGoogle", () => {
     expect(params.properties?.foo?.format).toBeUndefined();
   };
 
-  it("strips unsupported schema keywords for Google providers", () => {
+  it("strips unsupported schema keywords when modelId contains gemini", () => {
     const tool = createTool({
       type: "object",
       additionalProperties: false,
@@ -37,12 +37,32 @@ describe("sanitizeToolsForGoogle", () => {
     });
     const [sanitized] = sanitizeToolsForGoogle({
       tools: [tool],
-      provider: "google-gemini-cli",
+      modelId: "gemini-2.5-pro",
     });
     expectFormatRemoved(sanitized, "additionalProperties");
   });
 
-  it("returns original tools for non-google providers", () => {
+  it("matches modelId case-insensitively", () => {
+    const tool = createTool({
+      type: "object",
+      patternProperties: {
+        "^foo$": { type: "string" },
+      },
+      properties: {
+        foo: {
+          type: "string",
+          format: "uuid",
+        },
+      },
+    });
+    const [sanitized] = sanitizeToolsForGoogle({
+      tools: [tool],
+      modelId: "GeMiNi-Flash-2.0",
+    });
+    expectFormatRemoved(sanitized, "patternProperties");
+  });
+
+  it("returns original tools for non-gemini model ids", () => {
     const tool = createTool({
       type: "object",
       additionalProperties: false,
@@ -55,7 +75,7 @@ describe("sanitizeToolsForGoogle", () => {
     });
     const sanitized = sanitizeToolsForGoogle({
       tools: [tool],
-      provider: "openai",
+      modelId: "gpt-5",
     });
 
     expect(sanitized).toEqual([tool]);

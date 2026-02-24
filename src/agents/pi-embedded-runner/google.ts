@@ -201,13 +201,13 @@ export function sanitizeToolsForGoogle<
   TResult = unknown,
 >(params: {
   tools: AgentTool<TSchemaType, TResult>[];
-  provider: string;
+  modelId?: string;
 }): AgentTool<TSchemaType, TResult>[] {
   // Cloud Code Assist uses the OpenAPI 3.03 `parameters` field for both Gemini
   // AND Claude models.  This field does not support JSON Schema keywords such as
   // patternProperties, additionalProperties, $ref, etc.  We must clean schemas
-  // for every provider that routes through this path.
-  if (params.provider !== "google-gemini-cli") {
+  // for every model routed through Gemini-compatible tool schemas.
+  if (!params.modelId?.toLowerCase().includes("gemini")) {
     return params.tools;
   }
   return params.tools.map((tool) => {
@@ -223,14 +223,14 @@ export function sanitizeToolsForGoogle<
   });
 }
 
-export function logToolSchemasForGoogle(params: { tools: AgentTool[]; provider: string }) {
-  if (params.provider !== "google-gemini-cli") {
+export function logToolSchemasForGoogle(params: { tools: AgentTool[]; modelId?: string }) {
+  if (!params.modelId?.toLowerCase().includes("gemini")) {
     return;
   }
   const toolNames = params.tools.map((tool, index) => `${index}:${tool.name}`);
   const tools = sanitizeToolsForGoogle(params);
   log.info("google tool schema snapshot", {
-    provider: params.provider,
+    modelId: params.modelId,
     toolCount: tools.length,
     tools: toolNames,
   });
