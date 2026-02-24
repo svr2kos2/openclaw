@@ -1,0 +1,21 @@
+{
+  "name": "@openclaw/memory-teto",
+  "version": "2026.2.24",
+  "private": true,
+  "description": "OpenClaw Teto LanceDB-backed long-term memory plugin with LLM auto-recall/capture",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "@lancedb/lancedb": "^0.26.2",
+    "@sinclair/typebox": "0.34.48",
+    "openai": "^6.22.0"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
