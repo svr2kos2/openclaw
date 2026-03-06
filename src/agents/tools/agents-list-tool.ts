@@ -1,4 +1,3 @@
-import { Type } from "@sinclair/typebox";
 import { loadConfig } from "../../config/config.js";
 import {
   DEFAULT_AGENT_ID,
@@ -10,7 +9,16 @@ import type { AnyAgentTool } from "./common.js";
 import { jsonResult } from "./common.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./sessions-helpers.js";
 
-const AgentsListToolSchema = Type.Object({});
+// NOTE: Using a plain object schema instead of TypeBox to ensure compatibility with
+// strict schema validators (e.g., packycode's OpenAI-compatible API).
+// TypeBox's empty object schema can cause "None is not of type 'array'" errors
+// when the validator expects specific field types.
+const AgentsListToolSchema = {
+  type: "object",
+  properties: {},
+  required: [],
+  additionalProperties: false,
+};
 
 type AgentListEntry = {
   id: string;
