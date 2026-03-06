@@ -2,6 +2,31 @@ import type { AnyAgentTool } from "./pi-tools.types.js";
 import { cleanSchemaForGemini } from "./schema/clean-for-gemini.js";
 import { isXaiProvider, stripXaiUnsupportedKeywords } from "./schema/clean-for-xai.js";
 
+/**
+ * Recursively remove null values from a schema to ensure compatibility with
+ * strict schema validators (e.g., packycode's OpenAI-compatible API).
+ * JSON Schema does not allow null values in most fields.
+ */
+function removeNullValues(obj: unknown): unknown {
+  if (obj === null) {
+    return undefined;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(removeNullValues).filter((v) => v !== undefined);
+  }
+  if (typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      const cleaned = removeNullValues(value);
+      if (cleaned !== undefined) {
+        result[key] = cleaned;
+      }
+    }
+    return result;
+  }
+  return obj;
+}
+
 function extractEnumValues(schema: unknown): unknown[] | undefined {
   if (!schema || typeof schema !== "object") {
     return undefined;
@@ -91,13 +116,16 @@ export function normalizeToolParameters(
   const isXai = isXaiProvider(options?.modelProvider, options?.modelId);
 
   function applyProviderCleaning(s: unknown): unknown {
+    // Always remove null values for OpenAI-compatible APIs (including packycode)
+    // to prevent "None is not of type 'array'" errors.
+    const cleaned = removeNullValues(s);
     if (isGeminiProvider && !isAnthropicProvider) {
-      return cleanSchemaForGemini(s);
+      return cleanSchemaForGemini(cleaned);
     }
     if (isXai) {
-      return stripXaiUnsupportedKeywords(s);
+      return stripXaiUnsupportedKeywords(cleaned);
     }
-    return s;
+    return cleaned;
   }
 
   // If schema already has type + properties (no top-level anyOf to merge),
